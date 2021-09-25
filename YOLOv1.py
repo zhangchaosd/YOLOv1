@@ -1,6 +1,5 @@
 import xml.etree.ElementTree as ET
 import os
-import cv2
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -15,7 +14,6 @@ import torch.nn as nn
 
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
-import visdom
 
 DATASET_PATH = 'C:/Users/97090/Desktop/dataset/VOCdevkit/VOC2012/'
 CLASSES = ['person', 'bird', 'cat', 'cow', 'dog', 'horse', 'sheep',
@@ -71,6 +69,7 @@ def make_label_txt():
     for file in filenames:
         convert_annotation(file)
 
+'''
 def show_labels_img(imgname):
     """imgname是输入图像的名称，无下标"""
     impa = DATASET_PATH + "JPEGImages/" + imgname + ".jpg"
@@ -89,7 +88,7 @@ def show_labels_img(imgname):
             cv2.rectangle(img,pt1,pt2,(0,0,255,2))
     cv2.imshow("img",img)
     cv2.waitKey(0)
-
+'''
 #make_label_txt()
 #show_labels_img("2007_000027")
 
@@ -136,25 +135,8 @@ class VOC2012(Dataset):
         return len(self.filenames)
 
     def __getitem__(self, item):
-        img = cv2.imread(self.imgpath+self.filenames[item]+".jpg")  # 读取原始图像
-        h,w = img.shape[0:2]
-        input_size = 448  # 输入YOLOv1网络的图像尺寸为448x448
-        # 因为数据集内原始图像的尺寸是不定的，所以需要进行适当的padding，将原始图像padding成宽高一致的正方形
-        # 然后再将Padding后的正方形图像缩放成448x448
-        padw, padh = 0, 0  # 要记录宽高方向的padding具体数值，因为padding之后需要调整bbox的位置信息
-        if h>w:
-            padw = (h - w) // 2
-            img = np.pad(img,((0,0),(padw,padw),(0,0)),'constant',constant_values=0)
-        elif w>h:
-            padh = (w - h) // 2
-            img = np.pad(img,((padh,padh),(0,0),(0,0)), 'constant', constant_values=0)
-        img = cv2.resize(img,(input_size,input_size))
+        img = read_image(self.imgpath + self.filenames[item]+".jpg")  # 读取原始图像
         # 图像增广部分，这里不做过多处理，因为改变bbox信息还蛮麻烦的
-        if self.is_aug:
-            aug = transforms.Compose([
-                transforms.ToTensor()
-            ])
-            img = aug(img)
 
         # 读取图像对应的bbox信息，按1维的方式储存，每5个元素表示一个bbox的(cls,xc,yc,w,h)
         with open(self.labelpath+self.filenames[item]+".txt") as f:
@@ -177,11 +159,13 @@ class VOC2012(Dataset):
         labels = convert_bbox2labels(bbox)  # 将所有bbox的(cls,x,y,w,h)数据转换为训练时方便计算Loss的数据形式(7,7,5*B+cls_num)
         # 此处可以写代码验证一下，经过convert_bbox2labels函数后得到的labels变量中储存的数据是否正确
         labels = transforms.ToTensor()(labels)
-        return img,labels
 
+        if self.transform:
+            img = self.transform(img)
+        if self.target_transform:
+            labels = self.target_transform(labels)
 
-
-
+        return img, labels #TODO!!!!!!!!!!!!!!!!!!!添加transform操作
 
 def calculate_iou(bbox1,bbox2):
     """计算bbox1=(x1,y1,x2,y2)和bbox2=(x3,y3,x4,y4)两个bbox的iou"""
@@ -298,6 +282,30 @@ class YOLOv1_resnet(nn.Module):
         input = self.Conn_layers(input)
         return input.reshape(-1, (5 * NUM_BBOX + len(CLASSES)), 7, 7) #5 30 7 7
 
+class ImageTransform(object):
+    def __init__(self, input_size = 448):
+        assert isinstance(input_size, int)
+        self.input_size = input_size
+
+    def __call__(self, img):
+        h, w = img.shape[1:] # 3, h, w
+        paddinglr = 0
+        paddingud = 0 
+        if h < w:
+            paddingud = (w - h) // 2
+        elif w < h:
+            paddinglr = (h - w) // 2
+        img = transforms.functional.pad(img, padding = (paddinglr, paddingud), fill = 0)
+        img = transforms.functional.resize(img, (self.input_size, self.input_size))
+        return img #TODO!!!!!!!!!!!要不要 ToTensor()
+
+class LabelTransform(object):
+    def __init__(self, input_size = 448):
+        assert isinstance(input_size, int)
+        self.input_size = input_size
+
+    def __call__(self, label):
+        return label
 
 
 if __name__ == '__main__':
@@ -313,15 +321,8 @@ if __name__ == '__main__':
         device = torch.device('cpu')
         print('Using CPU')
 
-
-    transforms.Compose([
-        transforms.Resize((448, 448)),  # 缩放
-        transforms.ToTensor(),  # 图片转张量，同时归一化0-255 ---》 0-1
-        transforms.Normalize(norm_mean, norm_std),  # 标准化均值为0标准差为1
-    ])
-
     train_data = VOC2012()
-    train_dataloader = DataLoader(VOC2012(is_train = True), batch_size = batchsize, shuffle = True)
+    train_dataloader = DataLoader(VOC2012(is_train = True, transform = ImageTransform, target_transform = LabelTransform), batch_size = batchsize, shuffle = True)
 
     model = YOLOv1_resnet().to(device = device)
     # model.children()里是按模块(Sequential)提取的子模块，而不是具体到每个层，具体可以参见pytorch帮助文档
@@ -332,14 +333,9 @@ if __name__ == '__main__':
     criterion = Loss_yolov1()
     optimizer = torch.optim.SGD(model.parameters(), lr = lr, momentum = 0.9, weight_decay = 0.0005)
 
-    is_vis = False  # 是否进行可视化，如果没有visdom可以将其设置为false
-    if is_vis:
-        vis = visdom.Visdom()
-        viswin1 = vis.line(np.array([0.]),np.array([0.]),opts=dict(title="Loss/Step",xlabel="100*step",ylabel="Loss"))
-
     for e in range(epoch):
         model.train()
-        yl = torch.Tensor([0]).to(device = device)
+        #yl = torch.Tensor([0]).to(device = device)
         for i, (inputs, labels) in enumerate(train_dataloader):
             inputs = inputs.to(device = device)
             labels = labels.float().to(device = device)
@@ -350,9 +346,11 @@ if __name__ == '__main__':
             optimizer.step()
 
             print("Epoch %d/%d| Step %d/%d| Loss: %.2f"%(e, epoch, i, len(train_data)//batchsize, loss))
+            '''
             yl = yl + loss
             if is_vis and (i + 1) % 100 == 0:
                 vis.line(np.array([yl.cpu().item() / (i + 1)]), np.array([i + e * len(train_data) // batchsize]), win = viswin1, update = 'append')
+            '''
         if (e + 1) % 10 == 0:
             torch.save(model, "./models_pkl/YOLOv1_epoch" + str(e + 1) + ".pkl")
             #compute_val_map(model)
