@@ -50,6 +50,7 @@ def convert_annotation(image_id):
     w = int(size.find('width').text)
     h = int(size.find('height').text)
 
+
     for obj in root.iter('object'):
         difficult = obj.find('difficult').text
         cls = obj.find('name').text
@@ -57,8 +58,27 @@ def convert_annotation(image_id):
             continue
         cls_id = CLASSES.index(cls)
         xmlbox = obj.find('bndbox')
-        points = (float(xmlbox.find('xmin').text), float(xmlbox.find('xmax').text), float(xmlbox.find('ymin').text),
-             float(xmlbox.find('ymax').text))
+
+        xmin = float(xmlbox.find('xmin').text)
+        xmax = float(xmlbox.find('xmax').text)
+        ymin = float(xmlbox.find('ymin').text)
+        ymax = float(xmlbox.find('ymax').text)
+        l = w
+        if w > h:
+            paddingud = (w - h) // 2
+            ymin += paddingud
+            ymax += paddingud
+            l = w
+        elif w < h:
+            paddinglr = (h - w) // 2
+            xmin += paddinglr
+            xmax += paddinglr
+            l = h
+        xmin = 448 * xmin // l
+        xmax = 448 * xmax // l
+        ymin = 448 * ymin // l
+        ymax = 448 * ymax // l
+        points = (xmin, xmax, ymin, ymax)
         bb = convert((w, h), points)
         out_file.write(str(cls_id) + " " + " ".join([str(a) for a in bb]) + '\n')
 
@@ -69,45 +89,26 @@ def make_label_txt():
     for file in filenames:
         convert_annotation(file)
 
-'''
-def show_labels_img(imgname):
-    """imgname是输入图像的名称，无下标"""
-    impa = DATASET_PATH + "JPEGImages/" + imgname + ".jpg"
-    img = cv2.imread(impa)
-    h, w = img.shape[:2]
-    print(w,h)
-    label = []
-    with open(DATASET_PATH + "labels/"+imgname+".txt",'r') as flabel:
-        for label in flabel:
-            label = label.split(' ')
-            label = [float(x.strip()) for x in label]
-            print(CLASSES[int(label[0])])
-            pt1 = (int(label[1] * w - label[3] * w / 2), int(label[2] * h - label[4] * h / 2))
-            pt2 = (int(label[1] * w + label[3] * w / 2), int(label[2] * h + label[4] * h / 2))
-            cv2.putText(img,CLASSES[int(label[0])],pt1,cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,0,255))
-            cv2.rectangle(img,pt1,pt2,(0,0,255,2))
-    cv2.imshow("img",img)
-    cv2.waitKey(0)
-'''
-#make_label_txt()
-#show_labels_img("2007_000027")
+
 
 
 def convert_bbox2labels(bbox):
     """将bbox的(cls,x,y,w,h)数据转换为训练时方便计算Loss的数据形式(7,7,5*B+cls_num)
     注意，输入的bbox的信息是(xc,yc,w,h)格式的，转换为labels后，bbox的信息转换为了(px,py,w,h)格式"""
-    gridsize = 1.0/7
-    labels = np.zeros((7,7,5*NUM_BBOX+len(CLASSES)))  # 注意，此处需要根据不同数据集的类别个数进行修改
+    gridsize = 1.0 / 7
+    labels = torch.zeros((7, 7, 5 * NUM_BBOX + len(CLASSES)))  # 注意，此处需要根据不同数据集的类别个数进行修改
     for i in range(len(bbox)//5):
         gridx = int(bbox[i*5+1] // gridsize)  # 当前bbox中心落在第gridx个网格,列
         gridy = int(bbox[i*5+2] // gridsize)  # 当前bbox中心落在第gridy个网格,行
         # (bbox中心坐标 - 网格左上角点的坐标)/网格大小  ==> bbox中心点的相对位置
-        gridpx = bbox[i * 5 + 1] / gridsize - gridx
+        gridpx = bbox[i * 5 + 1] / gridsize - gridx #grid内偏移
         gridpy = bbox[i * 5 + 2] / gridsize - gridy
         # 将第gridy行，gridx列的网格设置为负责当前ground truth的预测，置信度和对应类别概率均置为1
-        labels[gridy, gridx, 0:5] = np.array([gridpx, gridpy, bbox[i * 5 + 3], bbox[i * 5 + 4], 1])
-        labels[gridy, gridx, 5:10] = np.array([gridpx, gridpy, bbox[i * 5 + 3], bbox[i * 5 + 4], 1])
+        labels[gridy, gridx, 0:5] = torch.Tensor([gridpx, gridpy, bbox[i * 5 + 3], bbox[i * 5 + 4], 1])
+        labels[gridy, gridx, 5:10] = torch.Tensor([gridpx, gridpy, bbox[i * 5 + 3], bbox[i * 5 + 4], 1])
         labels[gridy, gridx, 10+int(bbox[i*5])] = 1
+    labels = labels.transpose(2, 3)
+    labels = labels.transpose(1, 2)
     return labels
 
 
@@ -128,7 +129,7 @@ class VOC2012(Dataset):
         self.imgpath = DATASET_PATH + "JPEGImages/"  # 原始图像所在的路径
         self.labelpath = DATASET_PATH + "labels/"  # 图像对应的label文件(.txt文件)的路径
         self.is_aug = is_aug
-        self.transform = transform #TODO!!!!!!!!!!!!!!!!!!!!!!!
+        self.transform = transform
         self.target_transform = target_transform #TODO!!!!!!!!!!!!!!!!!!!!!!!
 
     def __len__(self):
@@ -137,7 +138,7 @@ class VOC2012(Dataset):
     def __getitem__(self, item):
         img = read_image(self.imgpath + self.filenames[item]+".jpg")  # 读取原始图像
         # 图像增广部分，这里不做过多处理，因为改变bbox信息还蛮麻烦的
-
+        img = img.type(torch.float)
         # 读取图像对应的bbox信息，按1维的方式储存，每5个元素表示一个bbox的(cls,xc,yc,w,h)
         with open(self.labelpath+self.filenames[item]+".txt") as f:
             bbox = f.read().split('\n')
@@ -146,26 +147,14 @@ class VOC2012(Dataset):
         if len(bbox)%5!=0:
             raise ValueError("File:"+self.labelpath+self.filenames[item]+".txt"+"——bbox Extraction Error!")
 
-        # 根据padding、图像增广等操作，将原始的bbox数据转换为修改后图像的bbox数据
-        for i in range(len(bbox)//5):
-            if padw != 0:
-                bbox[i * 5 + 1] = (bbox[i * 5 + 1] * w + padw) / h
-                bbox[i * 5 + 3] = (bbox[i * 5 + 3] * w) / h
-            elif padh != 0:
-                bbox[i * 5 + 2] = (bbox[i * 5 + 2] * h + padh) / w
-                bbox[i * 5 + 4] = (bbox[i * 5 + 4] * h) / w
-            # 此处可以写代码验证一下，查看padding后修改的bbox数值是否正确，在原图中画出bbox检验
-
         labels = convert_bbox2labels(bbox)  # 将所有bbox的(cls,x,y,w,h)数据转换为训练时方便计算Loss的数据形式(7,7,5*B+cls_num)
-        # 此处可以写代码验证一下，经过convert_bbox2labels函数后得到的labels变量中储存的数据是否正确
-        labels = transforms.ToTensor()(labels)
 
         if self.transform:
             img = self.transform(img)
-        if self.target_transform:
+        if self.target_transform: #可能不需要
             labels = self.target_transform(labels)
 
-        return img, labels #TODO!!!!!!!!!!!!!!!!!!!添加transform操作
+        return img, labels
 
 def calculate_iou(bbox1,bbox2):
     """计算bbox1=(x1,y1,x2,y2)和bbox2=(x3,y3,x4,y4)两个bbox的iou"""
@@ -185,7 +174,7 @@ def calculate_iou(bbox1,bbox2):
     # print(intersect_bbox)
     # input()
 
-    if area_intersect>0:
+    if area_intersect > 0:
         return area_intersect / (area1 + area2 - area_intersect)  # 计算iou
     else:
         return 0
@@ -200,14 +189,14 @@ class Loss_yolov1(nn.Module):
         :param labels: (batchsize,30,7,7)的样本标签数据
         :return: 当前批次样本的平均损失
         """
-        num_gridx, num_gridy = labels.size()[-2:]  # 划分网格数量
+        num_gridx, num_gridy = labels.shape[-2:]  # 划分网格数量
         num_b = 2  # 每个网格的bbox数量
         num_cls = 20  # 类别数量
         noobj_confi_loss = 0.  # 不含目标的网格损失(只有置信度损失)
         coor_loss = 0.  # 含有目标的bbox的坐标损失
         obj_confi_loss = 0.  # 含有目标的bbox的置信度损失
         class_loss = 0.  # 含有目标的网格的类别损失
-        n_batch = labels.size()[0]  # batchsize的大小
+        n_batch = labels.shape[0]  # batchsize的大小
 
         # 可以考虑用矩阵运算进行优化，提高速度，为了准确起见，这里还是用循环
         for i in range(n_batch):  # batchsize循环
@@ -297,7 +286,7 @@ class ImageTransform(object):
             paddinglr = (h - w) // 2
         img = transforms.functional.pad(img, padding = (paddinglr, paddingud), fill = 0)
         img = transforms.functional.resize(img, (self.input_size, self.input_size))
-        return img #TODO!!!!!!!!!!!要不要 ToTensor()
+        return img
 
 class LabelTransform(object):
     def __init__(self, input_size = 448):
@@ -309,9 +298,12 @@ class LabelTransform(object):
 
 
 if __name__ == '__main__':
+
+    #make_label_txt()
+
     epoch = 50
     batchsize = 15
-    lr = 0.001
+    lr = 0.01
 
     USE_GPU = True
     if USE_GPU and torch.cuda.is_available():
@@ -322,7 +314,7 @@ if __name__ == '__main__':
         print('Using CPU')
 
     train_data = VOC2012()
-    train_dataloader = DataLoader(VOC2012(is_train = True, transform = ImageTransform, target_transform = LabelTransform), batch_size = batchsize, shuffle = True)
+    train_dataloader = DataLoader(VOC2012(is_train = True, transform = ImageTransform(448), target_transform = LabelTransform(448)), batch_size = batchsize, shuffle = True)
 
     model = YOLOv1_resnet().to(device = device)
     # model.children()里是按模块(Sequential)提取的子模块，而不是具体到每个层，具体可以参见pytorch帮助文档
