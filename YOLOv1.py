@@ -50,7 +50,6 @@ def convert_annotation(image_id):
     w = int(size.find('width').text)
     h = int(size.find('height').text)
 
-
     for obj in root.iter('object'):
         difficult = obj.find('difficult').text
         cls = obj.find('name').text
@@ -79,17 +78,14 @@ def convert_annotation(image_id):
         ymin = 448 * ymin // l
         ymax = 448 * ymax // l
         points = (xmin, xmax, ymin, ymax)
-        bb = convert((w, h), points)
+        bb = convert((448, 448), points)
         out_file.write(str(cls_id) + " " + " ".join([str(a) for a in bb]) + '\n')
-
 
 def make_label_txt():
     """在labels文件夹下创建image_id.txt，对应每个image_id.xml提取出的bbox信息"""
     filenames = os.listdir(DATASET_PATH + 'Annotations')
     for file in filenames:
         convert_annotation(file)
-
-
 
 
 def convert_bbox2labels(bbox):
@@ -107,14 +103,12 @@ def convert_bbox2labels(bbox):
         labels[gridy, gridx, 0:5] = torch.Tensor([gridpx, gridpy, bbox[i * 5 + 3], bbox[i * 5 + 4], 1])
         labels[gridy, gridx, 5:10] = torch.Tensor([gridpx, gridpy, bbox[i * 5 + 3], bbox[i * 5 + 4], 1])
         labels[gridy, gridx, 10+int(bbox[i*5])] = 1
-    labels = labels.transpose(2, 3)
-    labels = labels.transpose(1, 2)
+    labels = labels.transpose(-2, -1)
+    labels = labels.transpose(-3, -2)
     return labels
 
-
-
 class VOC2012(Dataset):
-    def __init__(self, is_train=True, is_aug=True, transform = None, target_transform = None):
+    def __init__(self, is_train=True, transform = None, target_transform = None):
         """
         :param is_train: 调用的是训练集(True)，还是验证集(False)
         :param is_aug:  是否进行数据增广
@@ -128,7 +122,6 @@ class VOC2012(Dataset):
                 self.filenames = [x.strip() for x in f]
         self.imgpath = DATASET_PATH + "JPEGImages/"  # 原始图像所在的路径
         self.labelpath = DATASET_PATH + "labels/"  # 图像对应的label文件(.txt文件)的路径
-        self.is_aug = is_aug
         self.transform = transform
         self.target_transform = target_transform #TODO!!!!!!!!!!!!!!!!!!!!!!!
 
@@ -136,24 +129,19 @@ class VOC2012(Dataset):
         return len(self.filenames)
 
     def __getitem__(self, item):
-        img = read_image(self.imgpath + self.filenames[item]+".jpg")  # 读取原始图像
-        # 图像增广部分，这里不做过多处理，因为改变bbox信息还蛮麻烦的
-        img = img.type(torch.float)
+        img = read_image(self.imgpath + self.filenames[item] + ".jpg").to(device = device).type(torch.float)
         # 读取图像对应的bbox信息，按1维的方式储存，每5个元素表示一个bbox的(cls,xc,yc,w,h)
-        with open(self.labelpath+self.filenames[item]+".txt") as f:
+        with open(self.labelpath+self.filenames[item] + ".txt") as f:
             bbox = f.read().split('\n')
         bbox = [x.split() for x in bbox]
         bbox = [float(x) for y in bbox for x in y]
         if len(bbox)%5!=0:
             raise ValueError("File:"+self.labelpath+self.filenames[item]+".txt"+"——bbox Extraction Error!")
-
-        labels = convert_bbox2labels(bbox)  # 将所有bbox的(cls,x,y,w,h)数据转换为训练时方便计算Loss的数据形式(7,7,5*B+cls_num)
-
+        labels = convert_bbox2labels(bbox).to(device = device)  # 将所有bbox的(cls,x,y,w,h)数据转换为训练时方便计算Loss的数据形式(7,7,5*B+cls_num)
         if self.transform:
             img = self.transform(img)
-        if self.target_transform: #可能不需要
+        if self.target_transform:
             labels = self.target_transform(labels)
-
         return img, labels
 
 def calculate_iou(bbox1,bbox2):
@@ -170,9 +158,6 @@ def calculate_iou(bbox1,bbox2):
     area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])  # bbox1面积
     area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])  # bbox2面积
     area_intersect = (intersect_bbox[2] - intersect_bbox[0]) * (intersect_bbox[3] - intersect_bbox[1])  # 交集面积
-    # print(bbox1,bbox2)
-    # print(intersect_bbox)
-    # input()
 
     if area_intersect > 0:
         return area_intersect / (area1 + area2 - area_intersect)  # 计算iou
@@ -197,6 +182,9 @@ class Loss_yolov1(nn.Module):
         obj_confi_loss = 0.  # 含有目标的bbox的置信度损失
         class_loss = 0.  # 含有目标的网格的类别损失
         n_batch = labels.shape[0]  # batchsize的大小
+
+        #print(pred.shape)
+        #print(labels.shape)
 
         # 可以考虑用矩阵运算进行优化，提高速度，为了准确起见，这里还是用循环
         for i in range(n_batch):  # batchsize循环
@@ -230,7 +218,6 @@ class Loss_yolov1(nn.Module):
                         class_loss = class_loss + torch.sum((pred[i,10:,m,n] - labels[i,10:,m,n])**2)
                     else:  # 如果不包含物体
                         noobj_confi_loss = noobj_confi_loss + 0.5 * torch.sum(pred[i,[4,9],m,n]**2)
-
         loss = coor_loss + obj_confi_loss + noobj_confi_loss + class_loss
         # 此处可以写代码验证一下loss的大致计算是否正确，这个要验证起来比较麻烦，比较简洁的办法是，将输入的pred置为全1矩阵，再进行误差检查，会直观很多。
         return loss/n_batch
@@ -245,16 +232,16 @@ class YOLOv1_resnet(nn.Module):
         # 以下是YOLOv1的最后四个卷积层
         self.Conv_layers = nn.Sequential(
             nn.Conv2d(resnet_out_channel, 1024, 3, padding = 1),
-            #nn.BatchNorm2d(1024),  # 为了加快训练，这里增加了BN层，原论文里YOLOv1是没有的
+            nn.BatchNorm2d(1024),  # 为了加快训练，这里增加了BN层，原论文里YOLOv1是没有的
             nn.LeakyReLU(negative_slope = 0.1),
             nn.Conv2d(1024, 1024, 3, stride = 2, padding = 1),
-            #nn.BatchNorm2d(1024),
+            nn.BatchNorm2d(1024),
             nn.LeakyReLU(negative_slope = 0.1),
             nn.Conv2d(1024, 1024, 3, padding = 1),
-            #nn.BatchNorm2d(1024),
+            nn.BatchNorm2d(1024),
             nn.LeakyReLU(negative_slope = 0.1),
             nn.Conv2d(1024, 1024, 3, padding = 1),
-            #nn.BatchNorm2d(1024),
+            nn.BatchNorm2d(1024),
             nn.LeakyReLU(negative_slope = 0.1),
         )
         self.Conn_layers = nn.Sequential(
@@ -286,6 +273,8 @@ class ImageTransform(object):
             paddinglr = (h - w) // 2
         img = transforms.functional.pad(img, padding = (paddinglr, paddingud), fill = 0)
         img = transforms.functional.resize(img, (self.input_size, self.input_size))
+        #print('in transform')
+        #print(img.shape)
         return img
 
 class LabelTransform(object):
@@ -296,14 +285,40 @@ class LabelTransform(object):
     def __call__(self, label):
         return label
 
+def showsome():
+    img = read_image('C:/Users/97090/Desktop/dataset/VOCdevkit/VOC2012/JPEGImages/2007_000027.jpg')  # 读取原始图像
+        # 图像增广部分，这里不做过多处理，因为改变bbox信息还蛮麻烦的
+    print(img)
+    #img = img.type(torch.float)
+    print(img)
+    print(img.shape)
+    pa = transforms.Compose([ImageTransform(448)])
+    img = pa(img)
+    print(img.shape)
+
+    with open('C:/Users/97090/Desktop/dataset/VOCdevkit/VOC2012/labels/2007_000027.txt') as f:
+        bbox = f.read().split('\n')
+    bbox = [x.split() for x in bbox]
+    bbox = [float(x) for y in bbox for x in y]
+    print(len(bbox))
+    print(bbox)
+
+
+    plt.axis("off")
+    im = img.transpose(0,1)
+    im = im.transpose(1,2)
+    plt.imshow(im)
+    plt.show()
+
 
 if __name__ == '__main__':
 
     #make_label_txt()
+    #showsome()
 
     epoch = 50
-    batchsize = 15
-    lr = 0.01
+    batchsize = 5
+    lr = 0.001
 
     USE_GPU = True
     if USE_GPU and torch.cuda.is_available():
@@ -343,6 +358,7 @@ if __name__ == '__main__':
             if is_vis and (i + 1) % 100 == 0:
                 vis.line(np.array([yl.cpu().item() / (i + 1)]), np.array([i + e * len(train_data) // batchsize]), win = viswin1, update = 'append')
             '''
-        if (e + 1) % 10 == 0:
-            torch.save(model, "./models_pkl/YOLOv1_epoch" + str(e + 1) + ".pkl")
-            #compute_val_map(model)
+        #if (e + 1) % 10 == 0:
+        torch.save(model, "C:/Users/97090/Desktop/dataset/VOCdevkit/VOC2012/models_pkl/YOLOv1_epoch" + str(e + 1) + ".pkl")
+        print('saved one model')
+        #compute_val_map(model)
