@@ -313,11 +313,11 @@ def showsome():
 
 if __name__ == '__main__':
 
-    #make_label_txt()
+    #make_label_txt()1552
     #showsome()
 
     epoch = 50
-    batchsize = 5
+    batchsize = 15
     lr = 0.001
 
     USE_GPU = True
@@ -358,7 +358,7 @@ if __name__ == '__main__':
             if is_vis and (i + 1) % 100 == 0:
                 vis.line(np.array([yl.cpu().item() / (i + 1)]), np.array([i + e * len(train_data) // batchsize]), win = viswin1, update = 'append')
             '''
-        #if (e + 1) % 10 == 0:
-        torch.save(model, "C:/Users/97090/Desktop/dataset/VOCdevkit/VOC2012/models_pkl/YOLOv1_epoch" + str(e + 1) + ".pkl")
-        print('saved one model')
-        #compute_val_map(model)
+        if (e + 1) % 10 == 0:
+            torch.save(model, "C:/Users/97090/Desktop/dataset/VOCdevkit/VOC2012/models_pkl/YOLOv1_epoch" + str(e + 1) + ".pkl")
+            print('saved one model')
+            #compute_val_map(model)
